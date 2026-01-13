@@ -4,7 +4,7 @@ from model import TemporalSCCN
 import argparse
 import numpy as np
 from data_processing import EEGDatasetCached, RandomEEGDatasetCached
-
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import warnings
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     #parser.add_argument('--num_nodes', type=int, required=True, help='Number of nodes in the system')
     parser.add_argument('--input_dim', type=int, default=3, help='Input dimension per node (default: 3 for Lorenz)')
     parser.add_argument('--d_max', type=int, default=2, help='Maximum polynomial degree in library')
-    parser.add_argument('--win_len', type=int, default=50, help='Window length for local SINDy')
+    parser.add_argument('--win_len', type=int, default=1024, help='Window length for local SINDy')
     parser.add_argument('--max_rows', type=int, default=6000, help='Maximum number of rows to use in local SINDy')
     parser.add_argument('--rho_val', type=float, default=0.5, help='Rho value for hierarchical SOC constraint')
     parser.add_argument('--scale', type=float, default=1.2, help='Scaling factor for lambda')
@@ -54,19 +54,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     args.dt = 1/args.FS
-    args.stride = args.win_len
+    args.stride = 512
     args.half = (args.win_sg - 1) // 2
     args.num_nodes = 31
 
-    #dataset = EEGDatasetCached(args)
-    dataset = RandomEEGDatasetCached(
-    cache_dir="random_processed",
-    num_samples=10,
-    num_timesteps=130,
-    num_channels=30,
-    num_classes=2,
-    args=args
-)
+    dataset = EEGDatasetCached(args)
+    #dataset = RandomEEGDatasetCached(
+    #cache_dir="random_processed",
+    #num_samples=10,
+    #num_timesteps=130,
+    #num_channels=30,
+    #num_classes=2,
+    #args=args)
     #split dataset into train and test
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
@@ -81,6 +80,8 @@ if __name__ == "__main__":
     
     progress_bar = tqdm(range(args.epoch), desc="Epoch", leave=False)
     for epoch in progress_bar:
+        epoch_writer = SummaryWriter(log_dir=f"runs/epoch_{epoch}")
+        model.train()
         for batch in train_loader:
             model.zero_grad()
             windows = batch[0][0]
@@ -89,12 +90,15 @@ if __name__ == "__main__":
             train_loss = loss_fn(label.float(), output.squeeze(0))
             train_loss.backward()
             optimizer.step()
-            
+            epoch_writer.add_scalar('Train/Loss', train_loss.item(), epoch)
+
         for batch in test_loader:
             windows = batch[0][0]
             label = batch[0][-1].to(device)
             output = model(windows)
             test_loss = loss_fn(label.float(), output.squeeze(0))
-        
+            epoch_writer.add_scalar('Test/Loss', test_loss.item(), epoch)
+            
+        epoch_writer.close()
         progress_bar.set_postfix({'Train Loss': train_loss.item(), 'Test Loss': test_loss.item()})
         
