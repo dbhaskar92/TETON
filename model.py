@@ -7,8 +7,9 @@ if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
+    
 
-class TemporalSCCN(nn.Module):
+class TemporalSCCN_approach1(nn.Module):
     def __init__(
         self,
         in_channel,
@@ -39,7 +40,7 @@ class TemporalSCCN(nn.Module):
         self.LSTM = nn.LSTM(hidden_channels, hidden_channels, batch_first=True)
         
         # 4. Final Linear transformation
-        self.predict = nn.Linear(hidden_channels, 1)
+        self.predict = nn.Linear(hidden_channels, 2)
 
     def forward(self, temporal_snapshots):
         """
@@ -54,46 +55,46 @@ class TemporalSCCN(nn.Module):
         h_0, c_0 = None, None
         
         for t, snapshot_data in enumerate(temporal_snapshots):
-            features = snapshot_data[0]
-            incidences = snapshot_data[1]
-            adjacencies = snapshot_data[2]
-            
-            for key in incidences:
-                incidences[key] = incidences[key].to(device)
-            for key in adjacencies:
-                adjacencies[key] = adjacencies[key].to(device)
-            
-            x_0 = features[0].to(device)
-            x_1 = features[1].to(device)
-            x_2 = features[2].to(device)
+            if t != len(temporal_snapshots) - 1:
+                features = snapshot_data[0]
+                incidences = snapshot_data[1]
+                adjacencies = snapshot_data[2]
+                
+                for key in incidences:
+                    incidences[key] = incidences[key].to(device)
+                for key in adjacencies:
+                    adjacencies[key] = adjacencies[key].to(device)
+                
+                x_0 = features[0].to(device)
+                x_1 = features[1].to(device)
+                x_2 = features[2].to(device)
+                # --- Project Features ---
+                x_0 = self.proj_0(x_0)
+                x_1 = self.proj_1(x_1)
+                x_2 = self.proj_2(x_2)
+                
+                # Repack into dictionary for SCCNLayer
+                # SCCNLayer expects a dict: {0: tensor, 1: tensor, 2: tensor}
+                x_dict = {'rank_0': x_0, 'rank_1': x_1, 'rank_2': x_2}
 
-            # --- Project Features ---
-            x_0 = self.proj_0(x_0)
-            x_1 = self.proj_1(x_1)
-            x_2 = self.proj_2(x_2)
-            
-            # Repack into dictionary for SCCNLayer
-            # SCCNLayer expects a dict: {0: tensor, 1: tensor, 2: tensor}
-            x_dict = {'rank_0': x_0, 'rank_1': x_1, 'rank_2': x_2}
+                # --- Spatial Convolution (SCCN) ---
+                for layer in self.conv_layers:
+                    # TopoModelX SCCNLayer.forward(features, incidences, adjacencies)
+                    x_dict = layer(x_dict, incidences, adjacencies)
+                
+                # Extract Convolved Features
+                z_0, z_1, z_2 = x_dict['rank_0'], x_dict['rank_1'], x_dict['rank_2']
 
-            # --- Spatial Convolution (SCCN) ---
-            for layer in self.conv_layers:
-                # TopoModelX SCCNLayer.forward(features, incidences, adjacencies)
-                x_dict = layer(x_dict, incidences, adjacencies)
-            
-            # Extract Convolved Features
-            z_0, z_1, z_2 = x_dict['rank_0'], x_dict['rank_1'], x_dict['rank_2']
-
-            # --- Temporal Update (ROLAND) ---
-            # Initialize hidden states if first step
-            if h_0 is None and c_0 is None:
-                h_0 = torch.zeros_like(z_0)
-                c_0 = torch.zeros_like(z_0)
-            
-            # Update Memory
-            output, (h_0, c_0) = self.LSTM(z_0.unsqueeze(1), (h_0.unsqueeze(0), c_0.unsqueeze(0)))
-            h_0, c_0 = h_0.squeeze(0), c_0.squeeze(0)
+                # --- Temporal Update (ROLAND) ---
+                # Initialize hidden states if first step
+                if h_0 is None and c_0 is None:
+                    h_0 = torch.zeros_like(z_0)
+                    c_0 = torch.zeros_like(z_0)
+                
+                # Update Memory
+                output, (h_0, c_0) = self.LSTM(z_0.unsqueeze(1), (h_0.unsqueeze(0), c_0.unsqueeze(0)))
+                h_0, c_0 = h_0.squeeze(0), c_0.squeeze(0)
             
         output = output.max(dim=0, keepdim=True).values.squeeze(1)  # Global Max Pooling over nodes
         output = self.predict(output)
-        return output  # Return logits
+        return torch.nn.functional.sigmoid(output)  # Return probabilities

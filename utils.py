@@ -248,6 +248,3 @@ def construct_topological_snapshot(
     adjacencies = {'rank_0': A0, 'rank_1': A1, 'rank_2': A2}
     
     return features, incidences, adjacencies
-
-
-            

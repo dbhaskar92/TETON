@@ -1,8 +1,9 @@
 import pandas as pd
 import torch
-from model import TemporalSCCN
+from model import TemporalSCCN_approach1
 import argparse
 import numpy as np
+import os
 from data_processing import EEGDatasetCached, RandomEEGDatasetCached
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
@@ -16,6 +17,11 @@ warnings.filterwarnings(
 def sparse_collate(batch):
     return batch  # list of samples, no stacking
 
+def accuracy(outputs, labels):
+    _, preds = torch.max(outputs, dim=1)
+    correct = (preds == labels).sum().item()
+    total = labels.size(0)
+    return correct / total
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -50,6 +56,7 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for optimizer')
     parser.add_argument('--feature_aggr', type=str, choices=['mean', 'sum', 'max'], default='mean', help='Feature aggregation method')
     parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--output_dir', type=str, default='test_1')
     parser.add_argument('--epoch', type=int, default=10)
     args = parser.parse_args()
     
@@ -58,6 +65,9 @@ if __name__ == "__main__":
     args.half = (args.win_sg - 1) // 2
     args.num_nodes = 31
 
+    #check if args.output_dir exists, if not create it
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
     dataset = EEGDatasetCached(args)
     #dataset = RandomEEGDatasetCached(
     #cache_dir="random_processed",
@@ -74,31 +84,58 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=sparse_collate)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=sparse_collate)
     
-    model = TemporalSCCN(in_channel=args.win_len, hidden_channels=512, out_channels=2).to(device)
+    model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=512, out_channels=2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), args.lr)
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-    
+    loss_fn = torch.nn.BCELoss()
+    epoch_writer = SummaryWriter(log_dir=f"{args.output_dir}/runs/overall")
     progress_bar = tqdm(range(args.epoch), desc="Epoch", leave=False)
     for epoch in progress_bar:
-        epoch_writer = SummaryWriter(log_dir=f"runs/epoch_{epoch}")
+        loader_writer = SummaryWriter(log_dir=f"{args.output_dir}/runs/epoch_{epoch}")
         model.train()
+        correct_predictions = 0
+        iteration = 0
         for batch in train_loader:
             model.zero_grad()
             windows = batch[0][0]
             label = batch[0][-1].to(device)
-            output = model(windows)
-            train_loss = loss_fn(label.float(), output.squeeze(0))
-            train_loss.backward()
-            optimizer.step()
-            epoch_writer.add_scalar('Train/Loss', train_loss.item(), epoch)
-
+            if windows[0][0][0].shape[1] != args.win_len:
+                continue
+            else:
+                label = torch.nn.functional.one_hot(label, num_classes=2).float()
+                output = model(windows)
+                if label.dim() < 2:
+                    label = label.unsqueeze(0)
+                train_loss = loss_fn(output, label)
+                train_loss.backward()
+                optimizer.step()
+                loader_writer.add_scalar('Train/Loss', train_loss.item(), iteration)
+                iteration += 1
+                correct_predictions += (output.argmax(dim=1) == label.argmax(dim=1)).sum().item()
+            
+        train_accuracy = correct_predictions / len(train_dataset)
+        epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
+        
+        model.eval()
+        iteration = 0
+        correct_predictions = 0
         for batch in test_loader:
             windows = batch[0][0]
-            label = batch[0][-1].to(device)
-            output = model(windows)
-            test_loss = loss_fn(label.float(), output.squeeze(0))
-            epoch_writer.add_scalar('Test/Loss', test_loss.item(), epoch)
-            
+            if windows[0][0][0].shape[1] != args.win_len:
+                continue
+            else:
+                label = batch[0][-1].to(device)
+                output = model(windows)
+                label = torch.nn.functional.one_hot(label, num_classes=2).float()
+                if label.dim() < 2:
+                    label = label.unsqueeze(0)
+                test_loss = loss_fn(output, label)
+                correct_predictions += (output.argmax(dim=1) == label.argmax(dim=1)).sum().item()
+        
+                loader_writer.add_scalar('Test/Loss', test_loss.item(), iteration)
+                iteration += 1
+        loader_writer.close()
+        test_accuracy = correct_predictions / len(test_dataset)
+        epoch_writer.add_scalar('Test/Accuracy', test_accuracy, epoch)  
         epoch_writer.close()
         progress_bar.set_postfix({'Train Loss': train_loss.item(), 'Test Loss': test_loss.item()})
         
