@@ -1,6 +1,6 @@
 import pandas as pd
 import torch
-from model import TemporalSCCN_approach1
+from model import TemporalSCCN_approach1, TemporalSCCN_approach2
 import argparse
 import numpy as np
 import os
@@ -8,11 +8,13 @@ from data_processing import EEGDatasetCached, RandomEEGDatasetCached
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from utils import NLLLoss_numpy
 import warnings
 
 warnings.filterwarnings(
     "ignore"
 )
+torch.manual_seed(0)
 
 def sparse_collate(batch):
     return batch  # list of samples, no stacking
@@ -22,6 +24,94 @@ def accuracy(outputs, labels):
     correct = (preds == labels).sum().item()
     total = labels.size(0)
     return correct / total
+
+def train_GD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args):
+    model.train()
+    all_labels = torch.tensor([]).to(device)
+    all_outputs = torch.tensor([]).to(device)
+    model.zero_grad()
+    for batch in tqdm(train_loader):
+        windows = batch[0][0]
+        label = batch[0][-1].to(device)
+        if windows[0][0][0].shape[1] != args.win_len:
+            continue
+        else:
+            output = model(windows)
+            if label.dim() < 2:
+                label = label.unsqueeze(0)
+            all_labels = torch.cat((all_labels, label), dim=0)
+            all_outputs = torch.cat((all_outputs, output), dim=0)
+        torch.cuda.empty_cache()
+    train_loss = loss_fn(all_outputs, all_labels.long())
+    train_loss.backward()
+    optimizer.step()
+    epoch_writer.add_scalar('Train/Loss', train_loss.item(), epoch)
+    correct_predictions = (all_outputs.argmax(dim=1) == all_labels.long()).sum().item()
+    print(f"\n---------Epoch {epoch+1}/{args.epoch}---------")
+    print(f"\nTrain Correct Predictions: {correct_predictions} out of {all_labels.size(0)}")
+    #class distribution in all_labels
+    unique, counts = torch.unique(all_labels, return_counts=True)
+    print(f"Class distribution in train set: {dict(zip(unique.cpu().numpy().tolist(), counts.cpu().numpy().tolist()))}\n")   
+    train_accuracy = correct_predictions / all_labels.size(0)
+    epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
+    
+def train_SGD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args):
+    model.train()
+    correct_predictions = 0
+    iteration = 0
+    total_loss = 0
+    loader_writer = SummaryWriter(log_dir=f"save/{args.output_dir}/runs/epoch_{epoch}")
+    for batch in train_loader:
+        model.zero_grad()
+        windows = batch[0][0]
+        label = batch[0][-1].to(device)
+        if windows[0][0][0].shape[1] != args.win_len:
+            continue
+        else:
+            output = model(windows)
+            if label.dim() < 2:
+                label = label.unsqueeze(0)
+            #print("Output shape:", output.shape, "Label shape:", label.shape)
+            train_loss = loss_fn(output, label)
+            train_loss.backward()
+            optimizer.step()
+            iteration += 1
+            correct_predictions += (output.argmax(dim=1) == label).sum().item()
+            total_loss += train_loss.item()
+            loader_writer.add_scalar('Batch/Loss', train_loss.item(), iteration)
+
+    loader_writer.close()
+    print(f"\n-----------------Epoch {epoch+1}/{args.epoch}-----------------")
+    epoch_writer.add_scalar('Train/Loss', total_loss / iteration, epoch)
+    print(f"\n\nTrain Correct Predictions: {correct_predictions} out of {iteration}")  
+    train_accuracy = correct_predictions / iteration
+    epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
+    
+def test(model, device, test_loader, loss_fn, epoch_writer, epoch, args):
+    model.eval()
+    all_labels = torch.tensor([]).to(device)
+    all_outputs = torch.tensor([]).to(device)
+    for batch in test_loader:
+        windows = batch[0][0]
+        if windows[0][0][0].shape[1] != args.win_len:
+            print("Skipping test sample due to window length mismatch.")
+            continue
+        else:
+            label = batch[0][-1].to(device)
+            output = model(windows)
+            if label.dim() < 2:
+                label = label.unsqueeze(0)
+            all_labels = torch.cat((all_labels, label), dim=0)
+            all_outputs = torch.cat((all_outputs, output), dim=0)
+    test_loss = loss_fn(all_outputs, all_labels.long())
+    epoch_writer.add_scalar('Test/Loss', test_loss.item(), epoch)
+    correct_predictions = (all_outputs.argmax(dim=1) == all_labels.long()).sum().item()
+    print(f"Test Correct Predictions: {correct_predictions} out of {all_labels.size(0)}")
+    #class distribution in all_labels
+    unique, counts = torch.unique(all_labels, return_counts=True)
+    print(f"Class distribution in test set: {dict(zip(unique.cpu().numpy().tolist(), counts.cpu().numpy().tolist()))}\n")
+    test_accuracy = correct_predictions / all_labels.size(0)
+    epoch_writer.add_scalar('Test/Accuracy', test_accuracy, epoch)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -57,17 +147,18 @@ if __name__ == "__main__":
     parser.add_argument('--feature_aggr', type=str, choices=['mean', 'sum', 'max'], default='mean', help='Feature aggregation method')
     parser.add_argument('--data_dir', type=str)
     parser.add_argument('--output_dir', type=str, default='test_1')
+    parser.add_argument('--train_method', type=str, choices=['GD', 'SGD'], default='SGD')
+    parser.add_argument('--model_type', type=str, choices=['approach1', 'approach2'], default='approach1')
     parser.add_argument('--epoch', type=int, default=10)
     args = parser.parse_args()
     
     args.dt = 1/args.FS
     args.stride = 512
     args.half = (args.win_sg - 1) // 2
-    args.num_nodes = 31
 
     #check if args.output_dir exists, if not create it
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+    if not os.path.exists(f"save/{args.output_dir}"):
+        os.makedirs(f"save/{args.output_dir}")
     dataset = EEGDatasetCached(args)
     #dataset = RandomEEGDatasetCached(
     #cache_dir="random_processed",
@@ -77,65 +168,25 @@ if __name__ == "__main__":
     #num_classes=2,
     #args=args)
     #split dataset into train and test
-    train_size = int(0.8 * len(dataset))
+    train_size = int(0.7 * len(dataset))
     test_size = len(dataset) - train_size
+    print(test_size)
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
     
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=sparse_collate)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=sparse_collate)
-    
-    model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=512, out_channels=2).to(device)
+    if args.model_type == 'approach1':
+        model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=768, out_channels=2).to(device)
+    else:
+        model = TemporalSCCN_approach2(in_channel=args.win_len, hidden_channels=768, out_channels=2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), args.lr)
-    loss_fn = torch.nn.BCELoss()
-    epoch_writer = SummaryWriter(log_dir=f"{args.output_dir}/runs/overall")
-    progress_bar = tqdm(range(args.epoch), desc="Epoch", leave=False)
-    for epoch in progress_bar:
-        loader_writer = SummaryWriter(log_dir=f"{args.output_dir}/runs/epoch_{epoch}")
-        model.train()
-        correct_predictions = 0
-        iteration = 0
-        for batch in train_loader:
-            model.zero_grad()
-            windows = batch[0][0]
-            label = batch[0][-1].to(device)
-            if windows[0][0][0].shape[1] != args.win_len:
-                continue
-            else:
-                label = torch.nn.functional.one_hot(label, num_classes=2).float()
-                output = model(windows)
-                if label.dim() < 2:
-                    label = label.unsqueeze(0)
-                train_loss = loss_fn(output, label)
-                train_loss.backward()
-                optimizer.step()
-                loader_writer.add_scalar('Train/Loss', train_loss.item(), iteration)
-                iteration += 1
-                correct_predictions += (output.argmax(dim=1) == label.argmax(dim=1)).sum().item()
-            
-        train_accuracy = correct_predictions / len(train_dataset)
-        epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
-        
-        model.eval()
-        iteration = 0
-        correct_predictions = 0
-        for batch in test_loader:
-            windows = batch[0][0]
-            if windows[0][0][0].shape[1] != args.win_len:
-                continue
-            else:
-                label = batch[0][-1].to(device)
-                output = model(windows)
-                label = torch.nn.functional.one_hot(label, num_classes=2).float()
-                if label.dim() < 2:
-                    label = label.unsqueeze(0)
-                test_loss = loss_fn(output, label)
-                correct_predictions += (output.argmax(dim=1) == label.argmax(dim=1)).sum().item()
-        
-                loader_writer.add_scalar('Test/Loss', test_loss.item(), iteration)
-                iteration += 1
-        loader_writer.close()
-        test_accuracy = correct_predictions / len(test_dataset)
-        epoch_writer.add_scalar('Test/Accuracy', test_accuracy, epoch)  
-        epoch_writer.close()
-        progress_bar.set_postfix({'Train Loss': train_loss.item(), 'Test Loss': test_loss.item()})
+    loss_fn = torch.nn.CrossEntropyLoss()
+    epoch_writer = SummaryWriter(log_dir=f"save/{args.output_dir}/runs/overall")
+    for epoch in range(args.epoch):
+        if args.train_method == 'GD':
+            train_GD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args)
+        else:
+            train_SGD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args)
+        test(model, device, test_loader, loss_fn, epoch_writer, epoch, args)
+        print(f"----------------------------------------------\n")
         

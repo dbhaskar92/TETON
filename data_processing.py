@@ -23,19 +23,17 @@ class EEGDatasetCached(Dataset):
                 continue
 
             parts = filename.split("_")
-            if len(parts) < 4:
-                continue
+            if parts[0] == 'EEG':
+                group, sample_no, suffix = parts[1], parts[2], parts[3]
+                key = f"{group}_{sample_no}"
 
-            group, sample_no, suffix = parts[1], parts[2], parts[3]
-            key = f"{group}_{sample_no}"
+                if key not in temp_storage:
+                    temp_storage[key] = {'label': self.label_map.get(group)}
 
-            if key not in temp_storage:
-                temp_storage[key] = {'label': self.label_map.get(group)}
-
-            if "EEGdata" in suffix:
-                temp_storage[key]["data"] = filename
-            elif "EEGxyz" in suffix:
-                temp_storage[key]["xyz"] = filename
+                if "EEGdata" in suffix:
+                    temp_storage[key]["data"] = filename
+                elif "EEGxyz" in suffix:
+                    temp_storage[key]["xyz"] = filename
 
         # --------- process or index ----------
         for key, vals in tqdm(temp_storage.items(), desc="Processing dataset"):
@@ -78,33 +76,7 @@ class EEGDatasetCached(Dataset):
     def __getitem__(self, idx):
         sample = torch.load(self.samples[idx], map_location="cpu")
         return sample["data"], sample["xyz"], sample["label"]
-
-  
-#create a test dataset which creates a random number of samples with random data
-class TestEEGDataset(Dataset):
-    def __init__(self, num_samples=1, num_channels=10, num_timesteps=130, args=None):
-        self.num_samples = num_samples
-        self.num_channels = num_channels
-        self.num_timesteps = num_timesteps
-        self.args = args
-        self.samples = []
-        for _ in range(num_samples):
-            self.samples.append({})
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        item = self.samples[idx]
-        data_tensor = torch.randn(self.num_timesteps, self.num_channels, dtype=torch.float32)
-        xyz_tensor = torch.randn(self.num_channels, 3)
-        label = torch.tensor([1])
-        
-        new_data_tensors = SINDy_readout_predictions_single_dim(data_tensor, self.args)
-        return new_data_tensors, xyz_tensor, label
     
-    
-
 class RandomEEGDatasetCached(Dataset):
     def __init__(
         self,
