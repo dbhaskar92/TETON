@@ -8,7 +8,6 @@ from data_processing import EEGDatasetCached, RandomEEGDatasetCached
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import NLLLoss_numpy
 import warnings
 
 warnings.filterwarnings(
@@ -53,6 +52,51 @@ def train_GD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoc
     unique, counts = torch.unique(all_labels, return_counts=True)
     print(f"Class distribution in train set: {dict(zip(unique.cpu().numpy().tolist(), counts.cpu().numpy().tolist()))}\n")   
     train_accuracy = correct_predictions / all_labels.size(0)
+    epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
+    
+def train_MB(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args):
+    model.train()
+    labels = torch.tensor([]).to(device)
+    all_labels = torch.tensor([]).to(device)
+    all_outputs = torch.tensor([]).to(device)
+    iteration = 0
+    correct_predictions = 0
+    num_iter = 0
+    loader_writer = SummaryWriter(log_dir=f"save/{args.output_dir}/runs/epoch_{epoch}")
+    model.zero_grad()
+    for batch in tqdm(train_loader):
+        windows = batch[0][0]
+        label = batch[0][-1].to(device)
+        if windows[0][0][0].shape[1] != args.win_len:
+            continue
+        else:
+            output = model(windows)
+            if label.dim() < 2:
+                label = label.unsqueeze(0)
+            all_labels = torch.cat((all_labels, label), dim=0)
+            labels = torch.cat((labels, label), dim=0)
+            all_outputs = torch.cat((all_outputs, output), dim=0)
+            iteration += 1
+        
+        if iteration == args.batch_size:
+            train_loss = loss_fn(all_outputs, all_labels.long())
+            train_loss.backward()
+            optimizer.step()
+            correct_predictions+= (all_outputs.argmax(dim=1) == all_labels.long()).sum().item()
+            loader_writer.add_scalar('Batch/Loss', train_loss.item(), num_iter)
+            iteration = 0
+            num_iter += 1
+            all_labels = torch.tensor([]).to(device)
+            all_outputs = torch.tensor([]).to(device)
+            model.zero_grad()
+        torch.cuda.empty_cache()
+    loader_writer.close()
+    print(f"\n---------Epoch {epoch+1}/{args.epoch}---------")
+    print(f"\nTrain Correct Predictions: {correct_predictions} out of {labels.size(0)}")
+    #class distribution in all_labels
+    unique, counts = torch.unique(labels, return_counts=True)
+    print(f"Class distribution in train set: {dict(zip(unique.cpu().numpy().tolist(), counts.cpu().numpy().tolist()))}\n")   
+    train_accuracy = correct_predictions / labels.size(0)
     epoch_writer.add_scalar('Train/Accuracy', train_accuracy, epoch)
     
 def train_SGD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args):
@@ -146,8 +190,9 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for optimizer')
     parser.add_argument('--feature_aggr', type=str, choices=['mean', 'sum', 'max'], default='mean', help='Feature aggregation method')
     parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--batch_size', type=int, default=3)
     parser.add_argument('--output_dir', type=str, default='test_1')
-    parser.add_argument('--train_method', type=str, choices=['GD', 'SGD'], default='SGD')
+    parser.add_argument('--train_method', type=str, choices=['GD', 'SGD', 'MB'], default='SGD')
     parser.add_argument('--model_type', type=str, choices=['approach1', 'approach2'], default='approach1')
     parser.add_argument('--epoch', type=int, default=10)
     args = parser.parse_args()
@@ -170,7 +215,6 @@ if __name__ == "__main__":
     #split dataset into train and test
     train_size = int(0.7 * len(dataset))
     test_size = len(dataset) - train_size
-    print(test_size)
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
     
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=sparse_collate)
@@ -185,6 +229,8 @@ if __name__ == "__main__":
     for epoch in range(args.epoch):
         if args.train_method == 'GD':
             train_GD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args)
+        elif args.train_method == 'MB':
+            train_MB(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args)
         else:
             train_SGD(model, device, train_loader, optimizer, loss_fn, epoch_writer, epoch, args)
         test(model, device, test_loader, loss_fn, epoch_writer, epoch, args)
