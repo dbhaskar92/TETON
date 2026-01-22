@@ -190,10 +190,11 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate for optimizer')
     parser.add_argument('--feature_aggr', type=str, choices=['mean', 'sum', 'max'], default='mean', help='Feature aggregation method')
     parser.add_argument('--data_dir', type=str)
-    parser.add_argument('--batch_size', type=int, default=3)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--output_dir', type=str, default='test_1')
     parser.add_argument('--train_method', type=str, choices=['GD', 'SGD', 'MB'], default='SGD')
     parser.add_argument('--model_type', type=str, choices=['approach1', 'approach2'], default='approach1')
+    parser.add_argument('--n_layers', type=int, default=2)
     parser.add_argument('--epoch', type=int, default=10)
     args = parser.parse_args()
     
@@ -220,9 +221,9 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=sparse_collate)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=sparse_collate)
     if args.model_type == 'approach1':
-        model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=768, out_channels=2).to(device)
+        model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=768, out_channels=2, n_layers=args.n_layers).to(device)
     else:
-        model = TemporalSCCN_approach2(in_channel=args.win_len, hidden_channels=768, out_channels=2).to(device)
+        model = TemporalSCCN_approach2(in_channel=args.win_len, hidden_channels=768, out_channels=2, n_layers=args.n_layers).to(device)
     optimizer = torch.optim.Adam(model.parameters(), args.lr)
     loss_fn = torch.nn.CrossEntropyLoss()
     epoch_writer = SummaryWriter(log_dir=f"save/{args.output_dir}/runs/overall")

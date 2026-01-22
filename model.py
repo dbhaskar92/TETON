@@ -15,7 +15,7 @@ class TemporalSCCN_approach1(nn.Module):
         in_channel,
         hidden_channels,
         out_channels,
-        n_layers=1
+        n_layers=2
     ):
         super().__init__()
         self.hidden_channels = hidden_channels
