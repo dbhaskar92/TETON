@@ -210,13 +210,13 @@ def process_participant(participant_info, window_length=768, stride=384):
 # ============================================================================
 
 def run_sindy_analysis(all_samples, all_metadata, config):
-    """Run SINDy topological analysis on all samples."""
+    """Run SINDy topological analysis on all samples (per-window, not aggregated)."""
     try:
         from SINDy import SINDy_EEG_sample_analysis
         from argparse import Namespace
     except ImportError:
         print("Warning: SINDy module not found. Skipping SINDy analysis.")
-        return None
+        return None, None
     
     dt = 1.0 / config['sampling_rate']
     
@@ -246,33 +246,27 @@ def run_sindy_analysis(all_samples, all_metadata, config):
     
     sindy_results = []
     
-    print("Processing samples with SINDy analysis...")
+    print("Processing samples with SINDy analysis (per-window)...")
     for sample_idx in tqdm(range(len(all_samples)), desc="SINDy Analysis"):
         sample_windows = all_samples[sample_idx]
         
         try:
-            result = SINDy_EEG_sample_analysis(sample_windows, sindy_args, aggregate=True)
+            # Get per-window edge/triangle predictions (aggregate=False)
+            window_results = SINDy_EEG_sample_analysis(sample_windows, sindy_args, aggregate=False)
+            
+            # window_results is a list of dicts, one per window:
+            # {'edge_sweep': set, 'tri_sweep': set, 'window_idx': int}
             sindy_results.append({
                 'sample_idx': sample_idx,
-                'num_edges': len(result['edges']),
-                'num_triangles': len(result['triangles']),
-                'edges': result['edges'],
-                'triangles': result['triangles'],
-                'edge_counts': result['edge_counts'],
-                'triangle_counts': result['triangle_counts'],
-                'num_windows_analyzed': result['num_windows']
+                'num_windows': len(window_results),
+                'window_results': window_results
             })
         except Exception as e:
             print(f"  Sample {sample_idx}: ERROR - {str(e)}")
             sindy_results.append({
                 'sample_idx': sample_idx,
-                'num_edges': 0,
-                'num_triangles': 0,
-                'edges': set(),
-                'triangles': set(),
-                'edge_counts': {},
-                'triangle_counts': {},
-                'num_windows_analyzed': 0,
+                'num_windows': 0,
+                'window_results': [],
                 'error': str(e)
             })
     
@@ -380,30 +374,66 @@ def process_dataset(config):
     with open(os.path.join(config['output_dir'], 'dataset_info.json'), 'w') as f:
         json.dump(dataset_info, f, indent=2)
     
-    # Save SINDy results if available
+    # Save SINDy results if available (per-window structure)
     if sindy_results is not None:
-        sindy_edges_list = [[list(e) for e in r['edges']] for r in sindy_results]
-        sindy_triangles_list = [[list(t) for t in r['triangles']] for r in sindy_results]
+        # Structure: List of samples, each sample is a list of window results
+        # sindy_edges_per_sample[sample_idx][window_idx] = list of edges
+        # sindy_triangles_per_sample[sample_idx][window_idx] = list of triangles
+        
+        sindy_edges_per_sample = []
+        sindy_triangles_per_sample = []
+        window_metadata = []
+        
+        for r in sindy_results:
+            sample_idx = r['sample_idx']
+            sample_edges = []
+            sample_triangles = []
+            
+            for w_result in r['window_results']:
+                # Convert frozensets to sorted lists for storage
+                edges = [sorted(list(e)) for e in w_result['edge_sweep']]
+                triangles = [sorted(list(t)) for t in w_result['tri_sweep']]
+                sample_edges.append(edges)
+                sample_triangles.append(triangles)
+                
+                # Collect per-window metadata
+                window_metadata.append({
+                    'sample_idx': sample_idx,
+                    'window_idx': w_result['window_idx'],
+                    'num_edges': len(w_result['edge_sweep']),
+                    'num_triangles': len(w_result['tri_sweep']),
+                    'group': all_metadata[sample_idx]['group'],
+                    'event_type': all_metadata[sample_idx]['event_type']
+                })
+            
+            sindy_edges_per_sample.append(sample_edges)
+            sindy_triangles_per_sample.append(sample_triangles)
+        
+        # Create per-window DataFrame
+        sindy_window_df = pd.DataFrame(window_metadata)
         
         sindy_save_data = {
             'sindy_results': sindy_results,
-            'sindy_edges_list': sindy_edges_list,
-            'sindy_triangles_list': sindy_triangles_list,
+            'sindy_edges_per_sample': sindy_edges_per_sample,  # [sample][window] = list of edges
+            'sindy_triangles_per_sample': sindy_triangles_per_sample,  # [sample][window] = list of triangles
             'sindy_args': vars(sindy_args) if sindy_args else {},
+            'sindy_window_df': sindy_window_df
         }
         
         with open(os.path.join(config['output_dir'], 'sindy_topology.pkl'), 'wb') as f:
             pickle.dump(sindy_save_data, f)
         
-        # Save SINDy summary
-        sindy_df = pd.DataFrame([{
-            'sample_idx': r['sample_idx'],
-            'num_edges': r['num_edges'],
-            'num_triangles': r['num_triangles'],
-            'group': all_metadata[r['sample_idx']]['group'],
-            'event_type': all_metadata[r['sample_idx']]['event_type']
-        } for r in sindy_results])
-        sindy_df.to_csv(os.path.join(config['output_dir'], 'sindy_summary.csv'), index=False)
+        # Save per-window summary as CSV
+        sindy_window_df.to_csv(os.path.join(config['output_dir'], 'sindy_window_summary.csv'), index=False)
+        
+        # Print SINDy statistics
+        print(f"\n  SINDy Analysis Statistics (per-window):")
+        print(f"    Total windows analyzed: {len(window_metadata)}")
+        if window_metadata:
+            edge_counts = [w['num_edges'] for w in window_metadata]
+            triangle_counts = [w['num_triangles'] for w in window_metadata]
+            print(f"    Edges per window: min={min(edge_counts)}, max={max(edge_counts)}, mean={np.mean(edge_counts):.1f}")
+            print(f"    Triangles per window: min={min(triangle_counts)}, max={max(triangle_counts)}, mean={np.mean(triangle_counts):.1f}")
     
     # Print summary
     print(f"\nDataset saved to '{config['output_dir']}/'")
