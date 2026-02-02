@@ -721,6 +721,128 @@ def SINDy_readout_predictions_single_dim(data, args):
         edge_sweep, tri_sweep = SINDy_windowed(Xw, Yw, n, idx_patterns, maps0, edges0, w_degree_base, args)
         new_dataset.append(construct_topological_snapshot(Xw, [list(edge) for edge in edge_sweep], [list(tri) for tri in tri_sweep], args.feature_aggr))
     return new_dataset
+
+
+def SINDy_EEG_window_analysis(sample_windows, args):
+    """
+    Process EEG windows from EEG_Dataset_Creation notebook and extract edge/triangle predictions.
+    
+    This function takes pre-extracted windows from the EEG dataset creation pipeline
+    and applies SINDy analysis to discover topological structure (edges and triangles).
+    
+    Args:
+        sample_windows: numpy array of shape (num_windows, window_length, num_channels)
+                       - Pre-extracted windows from an EEG event segment
+                       - Each window is (window_length, num_channels), e.g., (768, 31)
+        args: argument namespace with SINDy parameters:
+              - win_sg: Savitzky-Golay window size for smoothing
+              - order: polynomial order for Savitzky-Golay filter
+              - dt: time step between samples
+              - d_max: maximum polynomial degree for library
+              - half: (win_sg - 1) // 2 for edge trimming
+              - Other ADMM/SINDy parameters (rho_val, admm_rho, etc.)
+    
+    Returns:
+        results: list of dicts, one per window, each containing:
+                 - 'edge_sweep': set of frozensets representing predicted edges
+                 - 'tri_sweep': set of frozensets representing predicted triangles
+                 - 'window_idx': index of the window
+    """
+    num_windows, window_length, num_channels = sample_windows.shape
+    
+    # Precompute patterns for the number of channels (nodes)
+    n = num_channels
+    idx_patterns = precompute_index_patterns(n, args.d_max, use_xp=True)
+    maps0, g_total = build_maps_from_patterns(n, args.d_max, idx_patterns)
+    edges0 = build_soc_edges_from_maps(args.d_max, maps0)
+    w_degree_base = degree_weights(maps0, g_total, args)
+    
+    results = []
+    
+    for w_idx in range(num_windows):
+        # Extract single window: (window_length, num_channels) -> transpose to (num_channels, window_length)
+        window_data = sample_windows[w_idx].T  # Shape: (num_channels, window_length)
+        
+        # Apply Savitzky-Golay smoothing and compute derivatives
+        X_smooth = savgol_filter(window_data, args.win_sg, args.order, axis=1, mode='interp')[:, args.half:-args.half]
+        dXdt_raw = savgol_filter(window_data, args.win_sg, args.order, deriv=1, delta=args.dt, axis=1, mode='interp')[:, args.half:-args.half]
+        
+        # Skip if window becomes too small after trimming
+        if X_smooth.shape[1] < 10:
+            results.append({
+                'edge_sweep': set(),
+                'tri_sweep': set(),
+                'window_idx': w_idx
+            })
+            continue
+        
+        # Standardize
+        mu = X_smooth.mean(axis=1, keepdims=True)
+        sig = X_smooth.std(axis=1, keepdims=True) + 1e-8
+        X = (X_smooth - mu) / sig
+        Y = dXdt_raw / sig
+        
+        # Run SINDy analysis on the window
+        edge_sweep, tri_sweep = SINDy_windowed(X, Y, n, idx_patterns, maps0, edges0, w_degree_base, args)
+        
+        results.append({
+            'edge_sweep': edge_sweep,
+            'tri_sweep': tri_sweep,
+            'window_idx': w_idx
+        })
+    
+    return results
+
+
+def SINDy_EEG_sample_analysis(sample_windows, args, aggregate=False):
+    """
+    Process an EEG sample (multiple windows from one event segment) and extract topology.
+    
+    This is a higher-level function that processes all windows from a sample and
+    optionally aggregates the edge/triangle predictions across windows.
+    
+    Args:
+        sample_windows: numpy array of shape (num_windows, window_length, num_channels)
+        args: SINDy parameters namespace
+        aggregate: if True, return aggregated edges/triangles across all windows
+                   if False, return per-window predictions
+    
+    Returns:
+        if aggregate=True:
+            dict with:
+            - 'edges': set of frozensets (edges appearing in at least one window)
+            - 'triangles': set of frozensets (triangles appearing in at least one window)
+            - 'edge_counts': dict mapping edge -> count of windows it appears in
+            - 'triangle_counts': dict mapping triangle -> count of windows it appears in
+        if aggregate=False:
+            list of per-window results from SINDy_EEG_window_analysis
+    """
+    window_results = SINDy_EEG_window_analysis(sample_windows, args)
+    
+    if not aggregate:
+        return window_results
+    
+    # Aggregate across windows
+    all_edges = set()
+    all_triangles = set()
+    edge_counts = {}
+    triangle_counts = {}
+    
+    for res in window_results:
+        for edge in res['edge_sweep']:
+            all_edges.add(edge)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+        
+        for tri in res['tri_sweep']:
+            all_triangles.add(tri)
+            triangle_counts[tri] = triangle_counts.get(tri, 0) + 1
+    
+    return {
+        'edges': all_edges,
+        'triangles': all_triangles,
+        'edge_counts': edge_counts,
+        'triangle_counts': triangle_counts
+    }
         
     
         
