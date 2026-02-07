@@ -6,7 +6,7 @@ import numpy as np
 import os
 from data_processing import EEGDatasetCached, RandomEEGDatasetCached
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import warnings
 
@@ -218,7 +218,20 @@ if __name__ == "__main__":
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
     
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=sparse_collate)
+    train_loader_test = DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=sparse_collate)
+    
+    train_targets = []
+    for batch in tqdm(train_loader_test):
+        train_targets.append(batch[0][-1].item())
+    class_counts = np.bincount(train_targets)
+    class_weights = 1. / class_counts
+    class_weights = torch.tensor(class_weights, dtype=torch.float)
+    sample_weights = [class_weights[t] for t in train_targets]
+    sampler = WeightedRandomSampler(weights=sample_weights,
+                                    num_samples=len(sample_weights),
+                                    replacement=True)
+    train_loader = DataLoader(train_dataset, batch_size=1, sampler=sampler, collate_fn=sparse_collate)
+    
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=sparse_collate)
     if args.model_type == 'approach1':
         model = TemporalSCCN_approach1(in_channel=args.win_len, hidden_channels=768, out_channels=2, n_layers=args.n_layers).to(device)
