@@ -46,6 +46,9 @@ def edge_F1(S2, gt_edges_set, q):
     return out
 
 def triangle_F1(S3_scores, gt_tris_set, q):
+    if not S3_scores:                       
+        return {"q": float(q), "tau3": 0.0, "P": 0.0, "R": 0.0, "F1": 0.0,
+                "TP": 0, "FP": 0, "FN": len(gt_tris_set)}
     vals = np.array(list(S3_scores.values())) if S3_scores else np.array([])
     tau3 = float(np.quantile(vals, q))
     pred = {t for t, s in S3_scores.items() if s >= tau3}
@@ -478,6 +481,8 @@ def sweep_edge_thresholds(S2, q):
     return pred
 
 def sweep_triangle_thresholds(S3_scores, q):
+    if not S3_scores:                          
+        return set()
     vals = np.array(list(S3_scores.values())) if S3_scores else np.array([])
     tau3 = float(np.quantile(vals, q))
     pred = set()

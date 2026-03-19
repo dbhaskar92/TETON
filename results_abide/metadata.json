@@ -1,0 +1,44 @@
+{
+  "dmn_indices": [
+    4,
+    5,
+    6,
+    8,
+    21,
+    22,
+    23,
+    25,
+    30,
+    31,
+    34,
+    35
+  ],
+  "dmn_names": [
+    "Middle Frontal Gyrus",
+    "Inferior Frontal Gyrus, pars triangularis",
+    "Inferior Frontal Gyrus, pars opercularis",
+    "Temporal Pole",
+    "Angular Gyrus",
+    "Lateral Occipital Cortex, superior division",
+    "Lateral Occipital Cortex, inferior division",
+    "Frontal Medial Cortex",
+    "Cingulate Gyrus, posterior division",
+    "Precuneous Cortex",
+    "Parahippocampal Gyrus, anterior division",
+    "Parahippocampal Gyrus, posterior division"
+  ],
+  "n_nodes": 12,
+  "subject_asd": "Pitt_0050003",
+  "subject_ctrl": "Pitt_0050030",
+  "site_asd": "PITT",
+  "site_ctrl": "PITT",
+  "TR": 2.0,
+  "args": {
+    "d_max": 3,
+    "win_len": 40,
+    "stride": 10,
+    "q": 0.75,
+    "S3_mode": "mean",
+    "dt": 2.0
+  }
+}
