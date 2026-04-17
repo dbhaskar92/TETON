@@ -211,3 +211,5 @@ data/
 processed_eeg_dataset/
 nilearn_cache/
 process_data.sh
+abide_sindy_processed/
+abide_sindy_processed_slow/
